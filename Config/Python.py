@@ -8,8 +8,8 @@ pip cache purge
 #######################################################
 # MODO Flash
 #######################################################
-pip install -r requirements.txt
-pip install -r requirements.txt
+pip freeze > requirements.txt
+pip freeze --no-version > requirements.txt
 
 pip install -r requirements.txt
 Exemplo de arquivo "requirements.txt":
