@@ -9,6 +9,9 @@ pip cache purge
 # MODO Flash
 #######################################################
 pip install -r requirements.txt
+pip install -r requirements.txt
+
+pip install -r requirements.txt
 Exemplo de arquivo "requirements.txt":
 
 httpx 
