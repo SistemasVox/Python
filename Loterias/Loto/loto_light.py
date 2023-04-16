@@ -3,6 +3,7 @@ import json
 import os
 import certifi
 import urllib3
+from datetime import datetime
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -28,7 +29,8 @@ for concurso in range(ultimo_concurso, 0, -1):
         continue
     if response.status_code == 200:
         data = response.json()
-        data_sorteio = data['dataApuracao']
+        # Converte a data de string para objeto datetime e formata para o padrão aaaa/mm/dd
+        data_sorteio = datetime.strptime(data["dataApuracao"], '%d/%m/%Y').strftime('%Y/%m/%d')
         numero = data['numero']
         dezenas = ', '.join(data['listaDezenas'])
         sorteios.append((data_sorteio, numero, dezenas))

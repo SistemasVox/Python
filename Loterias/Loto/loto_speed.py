@@ -2,6 +2,7 @@ import requests
 import os
 from tqdm import tqdm
 import urllib3
+from datetime import datetime
 
 # Remover avisos de SSL
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -31,7 +32,8 @@ for concurso in tqdm(range(ultimo_concurso, 0, -1), desc='Baixando resultados da
         response = session.get(url, stream=True, verify=False)
         response.raise_for_status()  # Levanta uma exceção para erros de conexão
         data = response.json()
-        data_sorteio = data['dataApuracao']
+        # Converte a data de string para objeto datetime e formata para o padrão aaaa/mm/dd
+        data_sorteio = datetime.strptime(data["dataApuracao"], '%d/%m/%Y').strftime('%Y/%m/%d')
         numero = data['numero']
         dezenas = ','.join(data['listaDezenas'])
         sorteios.append((data_sorteio, numero, dezenas))
