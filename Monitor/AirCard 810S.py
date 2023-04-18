@@ -7,6 +7,11 @@ import random
 from datetime import timedelta
 import datetime 
 
+# Importações adicionais
+from colorama import init, Fore, Back, Style
+# Inicialização da biblioteca colorama
+init(autoreset=True)
+
 def fetch_data():
     random_x = random.randint(10000, 99999)
     url = f"http://192.168.1.1/api/model.json?internalapi=1&x={random_x}"
@@ -50,13 +55,12 @@ def clear_screen():
     else:
         os.system("clear")
 
-clear_screen()
 keys_to_extract = [
     "SPN", "model", "webAppVersion", "devTemperature", "verMajor", "model", "currTime",
     "deviceName", "PMState", "batteryTemperature", "batteryVoltage", "battChargeLevel",
     "battChargeSource", "batteryState", "IP", "registerNetworkDisplay", "currentPSserviceType",
     "connectionText", "sessDuration", "sessStartTime", "dataTransferred", "dataTransferredRx",
-    "dataTransferredTx", "signalStrength", "curBand", "radioQuality", "country", "MCC", "cellId"
+    "dataTransferredTx", "signalStrength"
 ]
 
 def format_duration(duration):
@@ -66,30 +70,10 @@ def format_temperature(temp):
     return f"{temp}°"
 
 def format_voltage(voltage):
-    return f"{voltage / 1000:.2f}V"
+    return f"{voltage / 1000:.2f}mV"
 
 def format_battery(level):
     return f"{level}%"
-
-def extract_values(data):
-    extracted_values = {}
-    for key in keys_to_extract:
-        try:
-            if key == "signalStrength":
-                extracted_values[key] = data["wwan"]["signalStrength"]
-            elif key == "curBand":
-                extracted_values[key] = data["wwan"]["curBand"]
-            # ... todos os outros casos
-            if key in data["general"]:
-                extracted_values[key] = data["general"][key]
-            elif key in data["power"]:
-                extracted_values[key] = data["power"][key]
-            elif key in data["wwan"]:
-                extracted_values[key] = data["wwan"][key]
-        except KeyError:
-            pass
-
-    return extracted_values
 
 def format_bytes(value):
     value = float(value)
@@ -123,29 +107,49 @@ def format_signal_strength(signal_strength):
             formatted_strength.append(f"SINR: {value} dB")
     return "\n                ".join(formatted_strength)
 
+
 while True:
     data = fetch_data()
     if data:
         clear_screen()
-        extracted_data = extract_values(data)
-        for key, value in extracted_data.items():
-            if key in ["devTemperature", "batteryTemperature", "verMajor"]:
-                print(f"{key}: {format_temperature(value)}")
-            elif key == "batteryVoltage":
-                print(f"{key}: {format_voltage(value)}")
-            elif key == "battChargeLevel":
-                print(f"{key}: {format_battery(value)}")
-            elif key in ["sessDuration"]:
-                print(f"{key}: {format_duration(value)}")
-            elif key in ["sessStartTime", "currTime"]:
-                print(f"{key}: {format_datetime(value)}")
-            elif key in ["dataTransferred", "dataTransferredRx", "dataTransferredTx"]:
-                print(f"{key}: {format_bytes(value)}")
-            elif key == "signalStrength":
-                formatted_signal_strength = format_signal_strength(value)
-                print(f"{key}: {formatted_signal_strength}")
-            else:
-                print(f"{key}: {value}")
+        for key in keys_to_extract:
+            try:
+                value = data.get(key, None)
+                if value is None:
+                    value = data["general"].get(key, None)
+                if value is None:
+                    value = data["power"].get(key, None)
+                if value is None:
+                    value = data["wwan"].get(key, None)
+
+                if value is not None:
+                    if key in ["devTemperature", "batteryTemperature", "verMajor"]:
+                        print(f"{key}: {format_temperature(value)}")
+                    elif key == "batteryVoltage":
+                        print(f"{key}: {format_voltage(value)}")
+                    elif key == "battChargeLevel":
+                        print(f"{key}: {format_battery(value)}")
+                    elif key in ["sessDuration"]:
+                        print(f"{key}: {format_duration(value)}")
+                    elif key in ["sessStartTime", "currTime"]:
+                        print(f"{key}: {format_datetime(value)}")
+                    elif key in ["dataTransferred", "dataTransferredRx", "dataTransferredTx"]:
+                        print(f"{key}: {format_bytes(value)}")
+                    elif key == "signalStrength":
+                        formatted_signal_strength = format_signal_strength(value)
+                        print(f"{key}: {formatted_signal_strength}")
+                    else:
+                        print(f"{key}: {value}")
+
+            except KeyError:
+                pass
+
+        if "wwanadv" in data:
+            wwanadv = data["wwanadv"]
+            print(f"{Fore.RED}{Style.BRIGHT}wwanadv:{Style.RESET_ALL}")
+            for key, value in wwanadv.items():
+                print(f"        {key}: {value}")
+        else:
+            print("wwanadv não encontrado")
+
         time.sleep(5)
-    else:
-        print("reconectando...")
