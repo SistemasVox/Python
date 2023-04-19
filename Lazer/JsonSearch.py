@@ -1,62 +1,98 @@
 import json
 import requests
+import os
+import pyperclip
+
+def clear_screen():
+    """
+    Limpa a tela do terminal de acordo com o sistema operacional.
+    """
+    os.system('cls' if os.name == 'nt' else 'clear')
 
 def find_key(json_data, search_key, path=''):
     """
     Procura uma chave em um JSON, retornando o caminho e o valor da chave se ela for encontrada.
+
+    Args:
+        json_data (dict or list): O JSON no qual procurar a chave.
+        search_key (str): A chave a ser procurada.
+        path (str, optional): Caminho atual no JSON. Default: ''.
+
+    Returns:
+        tuple: Retorna uma tupla contendo o caminho e o valor da chave, se encontrada.
+        None: Retorna None se a chave não for encontrada.
     """
-    # Verifica se o objeto é um dicionário
     if isinstance(json_data, dict):
-        # Percorre todas as chaves e valores do dicionário
         for key, value in json_data.items():
-            # Se a chave buscada foi encontrada, retorna o caminho e o valor
             if key == search_key:
                 return f"{path}/{key}", value
-            # Caso contrário, procura a chave no valor correspondente
             result = find_key(value, search_key, f"{path}/{key}")
             if result:
                 return result
-    # Verifica se o objeto é uma lista
     elif isinstance(json_data, list):
-        # Percorre todos os itens da lista
         for i, item in enumerate(json_data):
-            # Procura a chave em cada item da lista
             result = find_key(item, search_key, f"{path}/{i}")
             if result:
                 return result
-    # Se o objeto não é nem dicionário nem lista, retorna None
     return None
 
-# URL do arquivo JSON a ser pesquisado
-url = f"http://192.168.1.1/api/model.json"
+def get_json_data():
+    """
+    Pergunta ao usuário se deseja inserir a URL do JSON ou o JSON manualmente e retorna o JSON.
 
-# Faz uma requisição GET na URL e armazena a resposta
-session = requests.Session()
-response = session.get(url)
+    Returns:
+        dict: Retorna o JSON obtido através da URL ou inserido manualmente.
+    """
+    while True:
+        try:
+            choice = input("Digite 1 para inserir a URL do JSON ou 2 para inserir o JSON manualmente: ")
 
-# Converte o conteúdo da resposta em um objeto JSON
-parsed_json = json.loads(response.text)
+            if choice == '1':
+                url = input("Digite a URL do JSON: ")
+                session = requests.Session()
+                response = session.get(url, timeout=10)
+                response.raise_for_status()
+                return json.loads(response.text)
+            elif choice == '2':
+                json_input = input("Digite o JSON: ")
+                return json.loads(json_input)
+            else:
+                print("Opção inválida. Tente novamente.")
+        except requests.exceptions.RequestException as e:
+            print(f"Erro ao buscar o JSON da URL: {e}")
+        except requests.exceptions.Timeout as e:
+            print(f"Tempo limite atingido ao buscar o JSON da URL: {e}")
+        except json.JSONDecodeError as e:
+            print(f"Erro ao decodificar o JSON: {e}")
+        except Exception as e:
+            print(f"Erro inesperado: {e}")
 
-# Chave a ser procurada no JSON
-key = 'rsrq'
+# Limpa a tela do terminal antes de começar
+clear_screen()
 
-# Procura a chave no JSON e armazena o resultado
+# Obtém o JSON do usuário (URL ou manualmente)
+parsed_json = get_json_data()
+
+# Pergunta ao usuário a chave que deseja procurar
+key = input("Digite a chave que deseja procurar: ")
+
+# Procura a chave no JSON
 result = find_key(parsed_json, key)
 
-# Verifica se a chave foi encontrada
+# Exibe os resultados
 if result:
-    # Extrai o caminho e o valor da chave do resultado
     path, value = result
-    
-    # Imprime o caminho e o valor da chave encontrada
     print(f"A chave '{key}' foi encontrada no caminho '{path}' com o valor '{value}'.")
-    
-    # Transforma o caminho da chave em um formato de acesso aos dados
     data_path = path.split('/')[1:]
     data_path = "['" + "']['".join(data_path) + "']"
+    command = f"data{data_path}"
+    print(f"Comando: {command} = '{value}'")
     
-    # Imprime o comando que pode ser usado para acessar a chave encontrada
-    print(f"Comando: data{data_path} = '{value}'")
+    # Copia o comando para a área de transferência
+    try:
+        pyperclip.copy(command)
+        print("O comando foi copiado para a área de transferência.")
+    except pyperclip.PyperclipException as e:
+        print(f"Erro ao copiar para a área de transferência: {e}")
 else:
-    # Imprime uma mensagem indicando que a chave não foi encontrada
     print(f"A chave '{key}' não foi encontrada.")
