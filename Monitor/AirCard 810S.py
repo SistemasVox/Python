@@ -5,19 +5,18 @@ import time
 import requests
 import random
 from datetime import timedelta
-import datetime 
+import datetime
 
 # Importações adicionais
 from colorama import init, Fore, Back, Style
+
 # Inicialização da biblioteca colorama
 init(autoreset=True)
+
 
 def fetch_data():
     random_x = random.randint(10000, 99999)
     url = f"http://192.168.1.1/api/model.json?internalapi=1&x={random_x}"
-
-    username = "admin"
-    password = "q1w2"
 
     response = retry_get(url, backoff_factor=2)
 
@@ -27,6 +26,7 @@ def fetch_data():
     else:
         print(f"Erro ao buscar dados: {response.status_code if response else 'Desconhecido'}")
         return None
+
 
 def retry_get(url, max_retries=3, backoff_factor=1):
     retries = 0
@@ -49,31 +49,29 @@ def retry_get(url, max_retries=3, backoff_factor=1):
 
     return None
 
+
 def clear_screen():
     if platform.system() == "Windows":
         os.system("cls")
     else:
         os.system("clear")
 
-keys_to_extract = [
-    "SPN", "model", "webAppVersion", "devTemperature", "verMajor", "model", "currTime",
-    "deviceName", "PMState", "batteryTemperature", "batteryVoltage", "battChargeLevel",
-    "battChargeSource", "batteryState", "IP", "registerNetworkDisplay", "currentPSserviceType",
-    "connectionText", "sessDuration", "sessStartTime", "dataTransferred", "dataTransferredRx",
-    "dataTransferredTx", "signalStrength"
-]
 
 def format_duration(duration):
     return str(timedelta(seconds=duration))
 
+
 def format_temperature(temp):
     return f"{temp}°"
+
 
 def format_voltage(voltage):
     return f"{voltage / 1000:.2f}mV"
 
+
 def format_battery(level):
     return f"{level}%"
+
 
 def format_bytes(value):
     value = float(value)
@@ -83,10 +81,11 @@ def format_bytes(value):
         value /= 1024.0
     return f"{value:.2f} {unit}"
 
+
 def format_datetime(timestamp):
     dt = datetime.datetime.fromtimestamp(timestamp)
-    # return dt.strftime("%Y-%m-%d %H:%M:%S")
     return dt.strftime("%H:%M:%S")
+
 
 def format_signal_strength(signal_strength):
     formatted_strength = []
@@ -108,48 +107,87 @@ def format_signal_strength(signal_strength):
     return "\n                ".join(formatted_strength)
 
 
+def calculate_speeds(curr_time, prev_time, data, prev_data):
+    time_diff = curr_time - prev_time
+    curr_data_transferred = float(data.get("wwan", {}).get("dataTransferred", 0))
+    prev_data_transferred = float(prev_data.get("wwan", {}).get("dataTransferred", 0))
+    curr_data_transferred_rx = float(data.get("wwan", {}).get("dataTransferredRx", 0))
+    prev_data_transferred_rx = float(prev_data.get("wwan", {}).get("dataTransferredRx", 0))
+    curr_data_transferred_tx = float(data.get("wwan", {}).get("dataTransferredTx", 0))
+    prev_data_transferred_tx = float(prev_data.get("wwan", {}).get("dataTransferredTx", 0))
+
+    total_speed = (curr_data_transferred - prev_data_transferred) / time_diff
+    download_speed = (curr_data_transferred_rx - prev_data_transferred_rx) / time_diff
+    upload_speed = (curr_data_transferred_tx - prev_data_transferred_tx) / time_diff
+
+    return total_speed, download_speed, upload_speed
+
+
+def print_speeds(total_speed, download_speed, upload_speed):
+    print("---- Velocidade Conexão ----")
+    print(f"Total: {format_bytes(total_speed)}/s.")
+    print(f"Download: {format_bytes(download_speed)}/s.")
+    print(f"Upload: {format_bytes(upload_speed)}/s.")
+    print("----------------------------")
+
+
+def print_data(data, prev_data, curr_time, prev_time):
+    clear_screen()
+
+    print("---- Dispositivo -----------")
+    print(f"Nome: {data['general']['deviceName']}.")
+    print(f"Hora: {format_datetime(data['general']['currTime'])}.")
+    print(f"Temperatura: {format_temperature(data['general']['devTemperature'])}.")
+    print(f"Temperatura MAX: {format_temperature(data['general']['verMajor'])}.")
+    print("----------------------------")
+
+    print("---- Bateria ---------------")
+    print(f"Status: {data.get('power', {}).get('PMState', 'N/A')}")
+    print(f"Temperatura: {format_temperature(data.get('power', {}).get('batteryTemperature'))}.")
+    print(f"Voltagem: {format_voltage(data.get('power', {}).get('batteryVoltage'))}.")
+    print(f"Carga: {format_battery(data.get('power', {}).get('battChargeLevel'))}.")
+    print(f"Fonte: {data.get('power', {}).get('battChargeSource', 'N/A')}.")
+    print(f"Estado: {data.get('power', {}).get('batteryState', 'N/A')}.")
+    print("----------------------------")
+    print("---- Operadora -------------")
+    print(f"Conexão: {data['wwan']['connectionText']}.")
+    print(f"Tipo de Conexão: {data['wwan']['currentPSserviceType']}.")
+    print(f"Banda: {data['wwanadv']['curBand']}")
+    print(f"Barras: {data.get('wwan', {}).get('signalStrength', {}).get('bars')}.")
+    print(f"RSRP: {data.get('wwan', {}).get('signalStrength', {}).get('rsrp')} dBm.")
+    print(f"RSRQ: {data.get('wwan', {}).get('signalStrength', {}).get('rsrq')} dB.")
+    print(f"SINR: {data.get('wwan', {}).get('signalStrength', {}).get('sinr')} dB.")
+    print(f"Operadora: {data.get('wwan', {}).get('registerNetworkDisplay')}.")
+    print(f"Torre: {data.get('wwanadv', {}).get('cellId')}.")
+    print(f"radioQuality: {data.get('wwanadv', {}).get('radioQuality')}dBm.")
+    print("----------------------------")
+
+    print("---- Conexão ---------------")
+    print(f"IP: {data.get('wwan', {}).get('IP')}.")
+    print(f"Duração: {format_duration(data['wwan'].get('sessDuration'))}.")
+    print(f"Início: {format_datetime(data['wwan'].get('sessStartTime'))}.")
+    print(f"Dados total: {format_bytes(data['wwan'].get('dataTransferred'))}.")
+    print(f"Download total: {format_bytes(data['wwan'].get('dataTransferredRx'))}.")
+    print(f"Upload total: {format_bytes(data['wwan'].get('dataTransferredTx'))}.")
+    print("----------------------------")
+
+    if prev_data and curr_time and prev_time:
+        total_speed, download_speed, upload_speed = calculate_speeds(curr_time, prev_time, data, prev_data)
+        print_speeds(total_speed, download_speed, upload_speed)
+
+
+
+prev_data = None
+prev_time = None
+
 while True:
     data = fetch_data()
     if data:
-        clear_screen()
-        for key in keys_to_extract:
-            try:
-                value = data.get(key, None)
-                if value is None:
-                    value = data["general"].get(key, None)
-                if value is None:
-                    value = data["power"].get(key, None)
-                if value is None:
-                    value = data["wwan"].get(key, None)
+        curr_time = data['general']['currTime']
+        print_data(data, prev_data, curr_time, prev_time)
 
-                if value is not None:
-                    if key in ["devTemperature", "batteryTemperature", "verMajor"]:
-                        print(f"{key}: {format_temperature(value)}")
-                    elif key == "batteryVoltage":
-                        print(f"{key}: {format_voltage(value)}")
-                    elif key == "battChargeLevel":
-                        print(f"{key}: {format_battery(value)}")
-                    elif key in ["sessDuration"]:
-                        print(f"{key}: {format_duration(value)}")
-                    elif key in ["sessStartTime", "currTime"]:
-                        print(f"{key}: {format_datetime(value)}")
-                    elif key in ["dataTransferred", "dataTransferredRx", "dataTransferredTx"]:
-                        print(f"{key}: {format_bytes(value)}")
-                    elif key == "signalStrength":
-                        formatted_signal_strength = format_signal_strength(value)
-                        print(f"{key}: {formatted_signal_strength}")
-                    else:
-                        print(f"{key}: {value}")
-
-            except KeyError:
-                pass
-
-        if "wwanadv" in data:
-            wwanadv = data["wwanadv"]
-            print(f"{Fore.RED}{Style.BRIGHT}wwanadv:{Style.RESET_ALL}")
-            for key, value in wwanadv.items():
-                print(f"        {key}: {value}")
-        else:
-            print("wwanadv não encontrado")
+        if curr_time:
+            prev_time = curr_time
+        prev_data = data.copy()
 
         time.sleep(5)
