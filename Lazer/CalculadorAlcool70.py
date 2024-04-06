@@ -1,26 +1,35 @@
-def calc_mix(vol_final):
-    # Constantes
-    conc_alcool_puro = 92.5  # 92,5%
-    conc_alcool_desejada = 70  # 70%
-    
-    # Volume de álcool puro necessário
-    vol_alcool_puro = (vol_final * conc_alcool_desejada) / 100
-    
-    # Volume de álcool 92,5% necessário
-    vol_alcool_92_5 = (vol_alcool_puro * 100) / conc_alcool_puro
-    
-    # Volume de água necessário
-    vol_agua = vol_final - vol_alcool_92_5
-    
-    return vol_alcool_92_5, vol_agua
+import os
 
-# Volume final desejado
-vol_final = float(input("Volume final desejado em litros: "))
+def clear():
+    os.system('cls' if os.name == 'nt' else 'clear')
 
-# Calcula os volumes necessários
-vol_alcool, vol_agua = calc_mix(vol_final)
+def calc(vf):
+    cap = 92.5
+    cad = 70
+    vap = (vf * cad) / 100
+    va92 = (vap * 100) / cap
+    va = vf - va92
+    return va92, va
 
-# Exibe os resultados
-print(f"Para {vol_final}L de solução a 70%, você precisará de:")
-print(f"- {vol_alcool:.2f}L de álcool 92,5%")
-print(f"- {vol_agua:.2f}L de água")
+while True:
+    clear()
+    op = input("Digite 'v' para volume final ou 'a' para água necessária: ")
+
+    if op.lower() == 'v':
+        vf = float(input("Volume final (litros): ").replace(',', '.'))
+        va, agua = calc(vf)
+        print(f"Para {vf if vf.is_integer() else round(vf, 3)}L a 70%, precisa de:")
+        print(f"- {va if va.is_integer() else round(va, 3)}L de álcool 92,5%")
+        print(f"- {agua if agua.is_integer() else round(agua, 3)}L de água")
+    elif op.lower() == 'a':
+        va92 = float(input("Álcool 92,5% disponível (litros): ").replace(',', '.'))
+        agua = ((va92 * 92.5) / 70) - va92
+        vf = va92 + agua
+        print(f"Para obter uma solução a 70% com {va92 if va92.is_integer() else round(va92, 3)}L de álcool 92,5%, precisa adicionar {agua if agua.is_integer() else round(agua, 3)}L de água.")
+        print(f"O volume final será de {vf if vf.is_integer() else round(vf, 3)}L.")
+    else:
+        print("Opção inválida. Digite 'v' ou 'a'.")
+
+    cont = input("Outra operação? (s/n): ")
+    if cont.lower() != 's':
+        break
