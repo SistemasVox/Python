@@ -3,7 +3,6 @@ import hashlib
 import platform
 from datetime import datetime
 
-# Limpe a tela com base no sistema operacional
 def clear_screen():
     if platform.system() == 'Windows':
         os.system('cls')
@@ -22,46 +21,43 @@ def exibir_mensagem(mensagem):
 exibir_mensagem("Iniciando o aplicativo...")
 exibir_mensagem(f"Buscando por arquivos duplicados em {diretorio}...")
 
-# Lista todos os arquivos no diretório
-arquivos = os.listdir(diretorio)
-
-# Cria um dicionário para armazenar os hashes dos arquivos
 hashes = {}
-
-# Lista para armazenar os nomes dos arquivos excluídos
 arquivos_excluidos = []
 
-# Percorre os arquivos e calcula o hash MD5 de cada um
-for arquivo in arquivos:
-    with open(os.path.join(diretorio, arquivo), "rb") as f:
-        conteudo = f.read()
-        hash_arquivo = hashlib.md5(conteudo).hexdigest()
+for entrada in os.scandir(diretorio):
+    if entrada.is_file():
+        hash_md5 = hashlib.md5()
+        with open(entrada.path, "rb") as f:
+            for chunk in iter(lambda: f.read(4096), b""):
+                hash_md5.update(chunk)
+        hash_arquivo = hash_md5.hexdigest()
         if hash_arquivo not in hashes:
             hashes[hash_arquivo] = []
-        hashes[hash_arquivo].append(arquivo)
+        hashes[hash_arquivo].append(entrada.path)
 
 exibir_mensagem("Verificação concluída. Removendo arquivos duplicados...")
 
-# Remove os arquivos duplicados
-for hash_arquivo, arquivos_duplicados in hashes.items():
-    if len(arquivos_duplicados) > 1:
+for hash_arquivo, caminhos in hashes.items():
+    if len(caminhos) > 1:
+        caminhos.sort(key=os.path.getmtime)  # Ordena os arquivos por data de criação
         exibir_mensagem(f"Arquivos duplicados para o hash '{hash_arquivo}':")
-        for idx, arquivo in enumerate(arquivos_duplicados, start=1):
-            exibir_mensagem(f"{idx}. {arquivo}")
-        exibir_mensagem("")
+        for idx, caminho in enumerate(caminhos, start=1):
+            exibir_mensagem(f"{idx}. {caminho}")
         
-        escolha = int(input("Digite o número do arquivo que deseja manter: "))
-        arquivos_a_manter = arquivos_duplicados[escolha - 1]
+        escolha = int(input("Digite o número do arquivo que deseja manter (ou 0 para manter o mais antigo): "))
+        arquivo_a_manter = caminhos[0] if escolha == 0 else caminhos[escolha - 1]
         
-        for arquivo in arquivos_duplicados:
-            if arquivo != arquivos_a_manter:
-                os.remove(os.path.join(diretorio, arquivo))
-                arquivos_excluidos.append(arquivo)  # Adiciona o arquivo excluído à lista
-                exibir_mensagem(f"Arquivo '{arquivo}' removido.")
-        clear_screen()  # Limpa a tela após cada interação com o usuário
+        for caminho in caminhos:
+            if caminho != arquivo_a_manter:
+                try:
+                    os.remove(caminho)
+                    arquivos_excluidos.append(caminho)
+                    exibir_mensagem(f"Arquivo '{caminho}' removido.")
+                except OSError as e:
+                    exibir_mensagem(f"Erro ao remover '{caminho}': {e.strerror}")
+        clear_screen()
 
-# Exibe um resumo dos arquivos excluídos
-exibir_mensagem("\n\nResumo dos arquivos excluídos:")
+exibir_mensagem("Resumo dos arquivos excluídos:")
 if arquivos_excluidos:
     for arquivo_excluido in arquivos_excluidos:
         exibir_mensagem(arquivo_excluido)
