@@ -5,6 +5,8 @@ import tkinter as tk
 from threading import Thread, Event
 import tkinter.messagebox as mb
 import tkinter.simpledialog as sd
+from collections import Counter
+import re
 
 from models.banco_de_dados import BancoDeDados
 from controllers.ui_controller import (
@@ -21,6 +23,80 @@ thread_running = Event()
 def atualizar_status(status_text, message):
     status_text.insert(tk.END, message + "\n")
     status_text.see(tk.END)
+
+def limpar_e_formatar_entrada(entrada):
+    """
+    Remove caracteres não numéricos e separa os números em pares de dois dígitos.
+    """
+    # Remove tudo que não for número
+    entrada_limpa = re.sub(r'\D', '', entrada)
+    # Divide a string em partes de 2 caracteres
+    numeros = [entrada_limpa[i:i+2] for i in range(0, len(entrada_limpa), 2)]
+    return numeros
+
+def conferir_jogos_dialog(status_text):
+    # Solicita o jogo campeão
+    jogo_campeao = sd.askstring(
+        "Conferir Jogos",
+        "Digite os números do Jogo Campeão (podem ser separados por qualquer caractere):",
+        parent=root
+    )
+    if not jogo_campeao:
+        atualizar_status(status_text, "Operação cancelada pelo usuário.\n")
+        return
+
+    # Limpa e formata o jogo campeão
+    jogo_campeao = limpar_e_formatar_entrada(jogo_campeao)
+    if len(jogo_campeao) == 0:
+        mb.showerror("Erro", "Nenhum número válido encontrado no Jogo Campeão.", parent=root)
+        return
+
+    atualizar_status(status_text, f"Jogo Campeão: {' '.join(jogo_campeao)}\n")
+
+    # Solicita a quantidade de jogos a conferir
+    try:
+        qtd_jogos = sd.askinteger(
+            "Conferir Jogos",
+            "Quantos jogos deseja conferir?",
+            minvalue=1,
+            parent=root
+        )
+        if not qtd_jogos:
+            atualizar_status(status_text, "Operação cancelada pelo usuário.\n")
+            return
+    except ValueError:
+        mb.showerror("Erro", "Quantidade de jogos inválida.", parent=root)
+        return
+
+    atualizar_status(status_text, f"Quantidade de jogos a conferir: {qtd_jogos}\n")
+
+    # Loop para receber os jogos
+    jogos_a_conferir = []
+    for i in range(1, qtd_jogos + 1):
+        jogo_atual = sd.askstring(
+            "Conferir Jogos",
+            f"Digite os números do Jogo {i} (podem ser separados por qualquer caractere):",
+            parent=root
+        )
+        if not jogo_atual:
+            mb.showerror("Erro", f"Jogo {i} não informado.", parent=root)
+            return
+
+        # Limpa e formata o jogo atual
+        jogo_atual = limpar_e_formatar_entrada(jogo_atual)
+        if len(jogo_atual) == 0:
+            mb.showerror("Erro", f"Nenhum número válido encontrado no Jogo {i}.", parent=root)
+            return
+
+        jogos_a_conferir.append(jogo_atual)
+        atualizar_status(status_text, f"Jogo {i}: {' '.join(jogo_atual)}\n")
+
+    # Resultado da conferência
+    atualizar_status(status_text, "=== Resultado da Conferência ===\n")
+    for idx, jogo in enumerate(jogos_a_conferir, start=1):
+        acertos = len(set(jogo) & set(jogo_campeao))
+        msg = f"Jogo {idx}: {' '.join(jogo)} -> Acertos: {acertos}\n"
+        atualizar_status(status_text, msg)
 
 def atualizar_banco_thread(status_text, db, info_label):
     try:
@@ -68,11 +144,14 @@ def gerar_jogo_com_restricoes(desejado_gap=None, desejado_std=None, max_tentativ
             return jogo
     return None
 
+from collections import Counter
+
 def exibir_estatisticas(status_text, db):
     usar_todos = mb.askyesno(
         "Estatísticas",
         "Deseja ver estatísticas de TODOS os concursos?\n"
-        "(Sim = todos, Não = escolher intervalo)"
+        "(Sim = todos, Não = escolher intervalo)",
+        parent=root
     )
 
     todos_jogos = db.recuperar_todos_jogos()
@@ -80,23 +159,13 @@ def exibir_estatisticas(status_text, db):
         atualizar_status(status_text, "Nenhum jogo encontrado no banco de dados.\n")
         return
 
-    if usar_todos:
-        concursos_filtrados = todos_jogos
-    else:
-        inicio = sd.askinteger("Intervalo", "Concurso inicial:", minvalue=1)
-        fim = sd.askinteger("Intervalo", "Concurso final:", minvalue=1)
+    if not usar_todos:
+        inicio = sd.askinteger("Intervalo", "Concurso inicial:", minvalue=1, parent=root)
+        fim = sd.askinteger("Intervalo", "Concurso final:", minvalue=1, parent=root)
 
         if inicio is None and fim is None:
             atualizar_status(status_text, "Operação cancelada pelo usuário.\n")
             return
-
-        min_concurso = min(num for (num, _) in todos_jogos)
-        max_concurso = max(num for (num, _) in todos_jogos)
-
-        if inicio is None:
-            inicio = min_concurso
-        if fim is None:
-            fim = max_concurso
 
         concursos_filtrados = [
             (num, dz) for (num, dz) in todos_jogos
@@ -114,8 +183,8 @@ def exibir_estatisticas(status_text, db):
     std_devs = []
     for (_, dezenas) in concursos_filtrados:
         jogo_obj = Jogo(dezenas=dezenas)
-        avg_gaps.append(jogo_obj.avaliar_distribuicao_avg_gap())
-        std_devs.append(jogo_obj.avaliar_distribuicao_std())
+        avg_gaps.append(round(jogo_obj.avaliar_distribuicao_avg_gap(), 2))
+        std_devs.append(round(jogo_obj.avaliar_distribuicao_std(), 2))
 
     quantidade = len(avg_gaps)
     if quantidade == 0:
@@ -127,20 +196,31 @@ def exibir_estatisticas(status_text, db):
     avg_gap_min, avg_gap_max = min(avg_gaps), max(avg_gaps)
     std_dev_min, std_dev_max = min(std_devs), max(std_devs)
 
-    real_inicial = min(num for (num, _) in concursos_filtrados)
-    real_final   = max(num for (num, _) in concursos_filtrados)
+    # Contagem de ocorrências
+    gap_counts = Counter(avg_gaps).most_common()
+    std_dev_counts = Counter(std_devs).most_common()
 
+    # Formatação da mensagem
     msg = (
         "=== Estatísticas do Banco de Dados ===\n"
-        f"Intervalo de concursos analisados: [{real_inicial}..{real_final}]\n"
         f"Jogos analisados: {quantidade}\n\n"
         f"- Média do Average Gap: {avg_gap_medio:.2f}\n"
         f"  (Mín: {avg_gap_min:.2f} | Máx: {avg_gap_max:.2f})\n\n"
         f"- Média do Std Dev: {std_dev_medio:.2f}\n"
-        f"  (Mín: {std_dev_min:.2f} | Máx: {std_dev_max:.2f})\n"
-        "-----------------------------------------\n"
+        f"  (Mín: {std_dev_min:.2f} | Máx: {std_dev_max:.2f})\n\n"
+        "=== Ocorrências de Average Gap ===\n"
     )
+    for gap, count in gap_counts:
+        msg += f"  Gap {gap:.2f}: {count} jogos\n"
+
+    msg += "\n=== Ocorrências de Std Dev ===\n"
+    for std, count in std_dev_counts:
+        msg += f"  Std Dev {std:.2f}: {count} jogos\n"
+
+    msg += "-----------------------------------------\n"
+
     atualizar_status(status_text, msg)
+
 
 def como_interpretar():
     texto = (
@@ -313,6 +393,13 @@ def create_main_screen():
     reset_button = tk.Button(button_frame, text="Resetar Jogo",
                              command=lambda: resetar_jogo(jogo_labels))
     reset_button.pack(side=tk.LEFT, padx=10)
+
+    def conferir_jogos():
+        # Função para conferir jogos
+        conferir_jogos_dialog(status_text)
+
+    conferencia_button = tk.Button(button_frame, text="Conferir Jogos", command=conferir_jogos)
+    conferencia_button.pack(side=tk.LEFT, padx=10)
 
     def iniciar_atualizacao_banco():
         if thread_running.is_set():
