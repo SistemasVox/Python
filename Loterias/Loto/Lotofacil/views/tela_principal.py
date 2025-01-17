@@ -34,7 +34,7 @@ def limpar_e_formatar_entrada(entrada):
     numeros = [entrada_limpa[i:i+2] for i in range(0, len(entrada_limpa), 2)]
     return numeros
 
-def conferir_jogos_dialog(status_text):
+def conferir_jogos_dialog(status_text, root):
     # Solicita o jogo campeão
     jogo_campeao = sd.askstring(
         "Conferir Jogos",
@@ -146,7 +146,7 @@ def gerar_jogo_com_restricoes(desejado_gap=None, desejado_std=None, max_tentativ
 
 from collections import Counter
 
-def exibir_estatisticas(status_text, db):
+def exibir_estatisticas(status_text, db, root):
     usar_todos = mb.askyesno(
         "Estatísticas",
         "Deseja ver estatísticas de TODOS os concursos?\n"
@@ -159,11 +159,15 @@ def exibir_estatisticas(status_text, db):
         atualizar_status(status_text, "Nenhum jogo encontrado no banco de dados.\n")
         return
 
-    if not usar_todos:
+    if usar_todos:
+        # Define todos os concursos como filtrados
+        concursos_filtrados = todos_jogos
+    else:
+        # Define o intervalo de concursos filtrados
         inicio = sd.askinteger("Intervalo", "Concurso inicial:", minvalue=1, parent=root)
         fim = sd.askinteger("Intervalo", "Concurso final:", minvalue=1, parent=root)
 
-        if inicio is None and fim is None:
+        if inicio is None or fim is None:
             atualizar_status(status_text, "Operação cancelada pelo usuário.\n")
             return
 
@@ -220,7 +224,6 @@ def exibir_estatisticas(status_text, db):
     msg += "-----------------------------------------\n"
 
     atualizar_status(status_text, msg)
-
 
 def como_interpretar():
     texto = (
@@ -356,7 +359,6 @@ def create_main_screen():
                     "----------------------------------------\n"
                 )
                 atualizar_status(status_text, msg)
-                # Adiciona o jogo ao histórico no formato: "números | métricas"
                 historico_listbox.insert(0, f"{' '.join(map(str, jogo_gerado.dezenas))} | Gap: {avg_gap:.2f}, Std: {std_dev:.2f}")
                 return
             else:
@@ -377,11 +379,9 @@ def create_main_screen():
                 "----------------------------------------\n"
             )
             atualizar_status(status_text, msg)
-            # Adiciona o jogo ao histórico no formato: "números | métricas"
             historico_listbox.insert(0, f"{' '.join(map(str, jogo_gerado.dezenas))} | Gap: {avg_gap:.2f}, Std: {std_dev:.2f}")
         else:
             atualizar_status(status_text, "Nenhum jogo foi retornado por atualizar_jogo.\n")
-
 
     gerar_button = tk.Button(button_frame, text="Gerar Jogo", command=gerar_jogo_exibir_valores)
     gerar_button.pack(side=tk.LEFT, padx=10)
@@ -395,8 +395,7 @@ def create_main_screen():
     reset_button.pack(side=tk.LEFT, padx=10)
 
     def conferir_jogos():
-        # Função para conferir jogos
-        conferir_jogos_dialog(status_text)
+        conferir_jogos_dialog(status_text, root)
 
     conferencia_button = tk.Button(button_frame, text="Conferir Jogos", command=conferir_jogos)
     conferencia_button.pack(side=tk.LEFT, padx=10)
@@ -411,7 +410,7 @@ def create_main_screen():
     atualizar_banco_button.pack(side=tk.LEFT, padx=10)
 
     def ver_estatisticas():
-        exibir_estatisticas(status_text, db)
+        exibir_estatisticas(status_text, db, root)
 
     estatisticas_button = tk.Button(button_frame, text="Ver Estatísticas", command=ver_estatisticas)
     estatisticas_button.pack(side=tk.LEFT, padx=10)
