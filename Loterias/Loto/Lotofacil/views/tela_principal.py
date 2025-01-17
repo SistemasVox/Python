@@ -7,6 +7,7 @@ import tkinter.messagebox as mb
 import tkinter.simpledialog as sd
 from collections import Counter
 import re
+from collections import Counter
 
 from models.banco_de_dados import BancoDeDados
 from controllers.ui_controller import (
@@ -143,8 +144,6 @@ def gerar_jogo_com_restricoes(desejado_gap=None, desejado_std=None, max_tentativ
         if ok_gap and ok_std:
             return jogo
     return None
-
-from collections import Counter
 
 def exibir_estatisticas(status_text, db, root):
     usar_todos = mb.askyesno(
