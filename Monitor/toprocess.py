@@ -1,87 +1,139 @@
 import tkinter as tk
 from tkinter import ttk
 import psutil
-import wmi                        # pip install wmi
+import wmi
 import threading
 import time
 import math
 import os
 import tempfile
+import subprocess
+import ipaddress
 from PIL import Image, ImageTk, ImageDraw
+
+class ToolTip:
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text = text
+        self.tipwin = None
+        widget.bind("<Enter>", self.show)
+        widget.bind("<Leave>", self.hide)
+
+    def show(self, event):
+        if self.tipwin or not self.text: return
+        x = event.x_root + 10; y = event.y_root + 10
+        self.tipwin = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{x}+{y}")
+        lbl = tk.Label(tw, text=self.text, justify='left',
+                       background="#ffffe0", relief='solid', borderwidth=1,
+                       font=("tahoma", "8", "normal"))
+        lbl.pack(ipadx=1)
+
+    def hide(self, event):
+        if self.tipwin:
+            self.tipwin.destroy()
+            self.tipwin = None
 
 class SystemMonitor:
     def __init__(self, root):
-        #--------------------------------------------------
-        # Janela
-        #--------------------------------------------------
         self.root = root
         self.root.title("System Monitor Pro")
-        self.root.geometry("780x420")
-        self.root.resizable(True, True)
+        self.root.geometry("900x460")
+        self.root.configure(bg="#2D2D2D")
 
-        #--------------------------------------------------
-        # Hardware info
-        #--------------------------------------------------
         c = wmi.WMI()
         cpu = c.Win32_Processor()[0]
-        self.cpu_name   = cpu.Name.strip()
-        self.cpu_hw_max = cpu.MaxClockSpeed / 1000.0   # GHz
-
+        self.cpu_name = cpu.Name.strip()
+        self.cpu_hw_max = cpu.MaxClockSpeed / 1000.0
         vm = psutil.virtual_memory()
-        self.mem_hw_max = vm.total / (1024**3)        # GB
-        self.mem_name   = f"{self.mem_hw_max:.2f} GB total"
-
+        self.mem_hw_max = vm.total / (1024 ** 3)
+        self.mem_name = f"{self.mem_hw_max:.2f} GB total"
+        disk = c.Win32_DiskDrive()[0]
+        self.disk_name = disk.Model.strip()
         self.disk_speed_max = 0.0
-        self.disk_name      = c.Win32_DiskDrive()[0].Model.strip()
-        self.disk_updated   = False
-
         self.cpu_cores = psutil.cpu_count(logical=True)
 
-        # dimensões gauge
-        base_radius        = 75
-        self.gauge_center  = 100
-        self.gauge_radius  = int(base_radius * 1.05)
-        self.needle_len    = int(self.gauge_radius * 0.9)
-        self.inner_radius  = int(10 * 0.95)
-
-        # cores
         self.colors = {
-            'bg':  '#2D2D2D',
-            'fg':  '#ECECEC',
-            'ac1': '#3498DB',
-            'ac2': '#2ECC71',
-            'ac3': '#E74C3C',
+            'bg': '#2D2D2D', 'fg': '#ECECEC',
+            'ac1': '#3498DB', 'ac2': '#2ECC71', 'ac3': '#E74C3C',
             'hdr': '#34495E'
         }
+        base_r = 75
+        self.gauge_center = 100
+        self.gauge_radius = int(base_r * 1.05)
+        self.needle_len = int(self.gauge_radius * 0.9)
+        self.inner_radius = int(10 * 0.95)
 
-        # UI
+        self.ping_target = "9.9.9.9"
+        self.local_gw, self.provider_gw = self.discover_gateways(self.ping_target)
+
         self.load_icons()
         self.configure_styles()
         self.create_widgets()
 
-        # dispara teste de disco
         threading.Thread(target=self._disk_speed_test, daemon=True).start()
 
-        # monitora
-        self.setup_monitoring()
+        self.process_cache = {}
+        self.disk_counters = {}
+        self.monitoring = True
+        self.update_interval = 2000
+
+        self.update_loop()
+
+    def discover_gateways(self, target):
+        out = subprocess.check_output(
+            ["tracert", "-d", "-w", "100", "-h", "30", target],
+            stderr=subprocess.DEVNULL, encoding='latin-1'
+        )
+        hops = []
+        for line in out.splitlines():
+            for tok in line.split():
+                try:
+                    addr = ipaddress.IPv4Address(tok)
+                    hops.append(str(addr))
+                except:
+                    pass
+
+        ip_pub_index = next((i for i, ip in enumerate(hops)
+                             if not ipaddress.ip_address(ip).is_private
+                             and ip != target), None)
+
+        if ip_pub_index is not None:
+            priv_before = [ip for ip in hops[:ip_pub_index]
+                           if ipaddress.ip_address(ip).is_private]
+            local = priv_before[-1] if priv_before else hops[0]
+        else:
+            priv = [ip for ip in hops if ipaddress.ip_address(ip).is_private]
+            local = priv[-1] if priv else target
+
+        pub = [ip for ip in hops
+               if not ipaddress.ip_address(ip).is_private and ip != target]
+        prov = next((ip for ip in pub if ip.endswith(".1")), None)
+        prov = prov or (pub[0] if pub else target)
+
+        return local, prov
 
     def load_icons(self):
         def circle(color, size=24):
-            img = Image.new('RGBA', (size, size), (0,0,0,0))
-            d   = ImageDraw.Draw(img)
-            d.ellipse((2,2,size-2,size-2), fill=color)
+            img = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+            d = ImageDraw.Draw(img)
+            d.ellipse((2, 2, size - 2, size - 2), fill=color)
             return ImageTk.PhotoImage(img)
-        self.cpu_icon  = circle(self.colors['ac1'])
-        self.mem_icon  = circle(self.colors['ac2'])
+        self.cpu_icon = circle(self.colors['ac1'])
+        self.mem_icon = circle(self.colors['ac2'])
         self.disk_icon = circle(self.colors['ac3'])
+        self.green_dot = circle(self.colors['ac2'], size=16)
+        self.red_dot = circle(self.colors['ac3'], size=16)
 
     def configure_styles(self):
-        s = ttk.Style(); s.theme_use('clam')
+        s = ttk.Style()
+        s.theme_use('clam')
         s.configure('Dark.TFrame', background=self.colors['bg'])
         s.configure('Header.TLabel',
                     background=self.colors['hdr'],
                     foreground=self.colors['fg'],
-                    font=('Segoe UI',10,'bold'),
+                    font=('Segoe UI', 10, 'bold'),
                     padding=2)
         s.configure('Treeview',
                     background=self.colors['bg'],
@@ -89,253 +141,292 @@ class SystemMonitor:
                     fieldbackground=self.colors['bg'],
                     borderwidth=0,
                     rowheight=16,
-                    font=('Segoe UI',8))
+                    font=('Segoe UI', 8))
         s.configure('Treeview.Heading',
                     background=self.colors['hdr'],
                     foreground=self.colors['fg'],
-                    font=('Segoe UI',8,'bold'),
+                    font=('Segoe UI', 8, 'bold'),
                     relief='flat')
 
     def create_widgets(self):
-        # frame central
         self.main_frame = ttk.Frame(self.root, style='Dark.TFrame')
-        self.main_frame.pack(fill='both', expand=True, padx=2, pady=(2,0))
+        self.main_frame.pack(fill='both', expand=True, padx=2, pady=(2, 0))
 
-        # cria gauges
-        for key,title,icon,color,fmt,unit,maxhw in [
-            ('cpu',    'CPU',    self.cpu_icon,  self.colors['ac1'], '{:.2f}%',    'GHz',   self.cpu_hw_max),
-            ('memory', 'Memory', self.mem_icon,  self.colors['ac2'], '{:.2f} MB', 'GB',    self.mem_hw_max),
-            ('disk',   'Disk',   self.disk_icon, self.colors['ac3'], '{:.2f} MB/s','MB/s', self.disk_speed_max),
-        ]:
-            self.create_gauge(key, title, icon, color,
-                              pct_max=100, hw_max=maxhw, hw_unit=unit,
-                              tree_fmt=fmt)
+        specs = [
+            ('cpu', 'CPU', self.cpu_icon, self.colors['ac1'], '{:.2f}%', 'GHz', self.cpu_hw_max),
+            ('memory', 'Memória', self.mem_icon, self.colors['ac2'], '{:.2f} GB', 'GB', self.mem_hw_max),
+            ('disk', 'Disco', self.disk_icon, self.colors['ac3'], '{:.2f} MB/s', 'MB/s', 0.0),
+        ]
+        for key, title, icon, col, fmt, unit, maxhw in specs:
+            self.create_gauge(key, title, icon, col, 100, maxhw, unit, fmt)
 
-        # footer (com âncoras válidas)
+        self.ping_frame = ttk.Frame(self.root, style='Dark.TFrame')
+        self.ping_frame.pack(fill='x', padx=8, pady=(4, 0))
+        ttk.Label(self.ping_frame, text='PING', style='Header.TLabel').pack(side='left', padx=(0, 6))
+        self.ping_ips = [self.local_gw, self.provider_gw, self.ping_target]
+        self.ping_lbls = []
+        for ip in self.ping_ips:
+            lbl = ttk.Label(self.ping_frame, image=self.red_dot)
+            lbl.pack(side='left', padx=4)
+            ToolTip(lbl, ip)
+            self.ping_lbls.append(lbl)
+
         footer = ttk.Frame(self.root, style='Dark.TFrame')
-        footer.pack(fill='x', padx=2, pady=(4,0))
-        ttk.Label(footer, text=self.cpu_name,  style='Header.TLabel', anchor='w').pack(side='left',   expand=True, fill='x')
-        ttk.Label(footer, text=self.mem_name,   style='Header.TLabel', anchor='center').pack(side='left', expand=True, fill='x')
-        ttk.Label(footer, text=self.disk_name,  style='Header.TLabel', anchor='e').pack(side='left',   expand=True, fill='x')
+        footer.pack(fill='x', padx=2, pady=(2, 0))
+        ttk.Label(footer, text=self.cpu_name, style='Header.TLabel', anchor='w').pack(side='left', expand=True, fill='x')
+        ttk.Label(footer, text=self.mem_name, style='Header.TLabel', anchor='center').pack(side='left', expand=True, fill='x')
+        ttk.Label(footer, text=self.disk_name, style='Header.TLabel', anchor='e').pack(side='left', expand=True, fill='x')
 
-        # controles
         ctrl = ttk.Frame(self.root, style='Dark.TFrame')
-        ctrl.pack(fill='x', padx=2, pady=2)
-        self.btn_pause    = ttk.Button(ctrl, text='⏸ Pause',   command=self.stop_monitoring)
-        self.btn_resume   = ttk.Button(ctrl, text='▶ Resume',  command=self.restart_monitoring, state=tk.DISABLED)
-        self.btn_minimize = ttk.Button(ctrl, text='🗕 Minimize',command=self.root.iconify)
-        self.btn_exit     = ttk.Button(ctrl, text='⏏ Exit',    command=self.root.quit)
-        for btn in (self.btn_pause, self.btn_resume, self.btn_minimize):
-            btn.pack(side='left', padx=2)
+        ctrl.pack(fill='x', padx=2, pady=(0, 4))
+        self.btn_pause = ttk.Button(ctrl, text='⏸ Pause', command=self.stop)
+        self.btn_resume = ttk.Button(ctrl, text='▶ Resume', command=self.start, state=tk.DISABLED)
+        self.btn_minimize = ttk.Button(ctrl, text='🗕 Minimize', command=self.root.iconify)
+        self.btn_exit = ttk.Button(ctrl, text='⏏ Exit', command=self.root.quit)
+        for b in (self.btn_pause, self.btn_resume, self.btn_minimize):
+            b.pack(side='left', padx=2)
         self.btn_exit.pack(side='right', padx=2)
 
     def create_gauge(self, key, title, icon, color, pct_max, hw_max, hw_unit, tree_fmt):
         frm = ttk.Frame(self.main_frame, style='Dark.TFrame')
         frm.pack(side='left', padx=2, pady=2, fill='both', expand=True)
-        setattr(self, f'{key}_frame', frm)
-        setattr(self, f'{key}_fmt',      tree_fmt)
-        setattr(self, f'{key}_unit',     hw_unit)
-        setattr(self, f'{key}_pct_max',  pct_max)
-        setattr(self, f'{key}_angle',    135.0)  # ângulo inicial
+        setattr(self, f'{key}_fmt', tree_fmt)
+        setattr(self, f'{key}_unit', hw_unit)
+        setattr(self, f'{key}_pct_max', pct_max)
+        setattr(self, f'{key}_angle', 135.0)
 
-        # header
-        hdr = ttk.Frame(frm, style='Dark.TFrame'); hdr.pack(fill='x', pady=(0,4))
-        ttk.Label(hdr, image=icon, style='Header.TLabel').pack(side='left', padx=2)
-        ttk.Label(hdr, text=title,   style='Header.TLabel').pack(side='left', padx=4)
+        hdr = ttk.Frame(frm, style='Dark.TFrame')
+        hdr.pack(fill='x', pady=(0, 4))
+        ttk.Label(hdr, image=icon, style='Header.TLabel').pack(side='left')
+        ttk.Label(hdr, text=title, style='Header.TLabel').pack(side='left', padx=4)
 
-        # canvas
-        size   = self.gauge_center*2
-        canvas = tk.Canvas(frm, width=size, height=size,
-                           bg=self.colors['bg'], highlightthickness=0)
-        canvas.pack()
-        setattr(self, f'{key}_canvas', canvas)
-        self._draw_background(canvas, pct_max, hw_max)
-        needle = canvas.create_line(
+        size = self.gauge_center * 2
+        cvs = tk.Canvas(frm, width=size, height=size, bg=self.colors['bg'], highlightthickness=0)
+        cvs.pack()
+        setattr(self, f'{key}_canvas', cvs)
+        self._draw_background(cvs, pct_max, hw_max)
+
+        needle = cvs.create_line(
             self.gauge_center, self.gauge_center,
             self.gauge_center, self.gauge_center - self.needle_len,
             fill=color, width=4, tags='needle'
         )
         setattr(self, f'{key}_needle', needle)
 
-        # textos
-        y_val = self.gauge_center + int(self.gauge_radius*0.5)
-        canvas.create_text(self.gauge_center, y_val,
-                           text='0.0%', tags='value_text',
-                           fill=self.colors['fg'], font=('Segoe UI',12,'bold'))
-        y_hw = self.gauge_center + int(self.gauge_radius*0.7)
-        canvas.create_text(self.gauge_center, y_hw,
-                           text=hw_unit, tags='hw_text',
-                           fill=self.colors['fg'], font=('Segoe UI',8))
+        y1 = self.gauge_center + int(self.gauge_radius * 0.5)
+        cvs.create_text(self.gauge_center, y1, text='0.0%', tags='value_text',
+                        fill=self.colors['fg'], font=('Segoe UI', 12, 'bold'))
+        y2 = self.gauge_center + int(self.gauge_radius * 0.7)
+        cvs.create_text(self.gauge_center, y2, text=hw_unit, tags='hw_text',
+                        fill=self.colors['fg'], font=('Segoe UI', 8))
 
-        # tabela top5
-        tree = ttk.Treeview(frm, columns=('Proc','Val'), show='headings', height=5)
-        tree.heading('Proc', text='Process', anchor='w')
-        tree.heading('Val',  text='Value',   anchor='e')
-        tree.column('Proc', width=120, anchor='w')
-        tree.column('Val',  width=60,  anchor='e')
-        tree.pack(fill='x', padx=2, pady=(4,2))
+        tree = ttk.Treeview(frm, columns=('P', 'V'), show='headings', height=5)
+        tree.heading('P', text='Process', anchor='w')
+        tree.heading('V', text='Value', anchor='e')
+        tree.column('P', width=120, anchor='w')
+        tree.column('V', width=60, anchor='e')
+        tree.pack(fill='x', padx=2, pady=(4, 2))
         setattr(self, f'{key}_tree', tree)
 
-    def _draw_background(self, canvas, pct_max, hw_max):
-        sa, ea = 135, 405; c, r = self.gauge_center, self.gauge_radius
-        canvas.create_arc(c-r,c-r,c+r,c+r, start=sa, extent=ea-sa,
-                          outline=self.colors['fg'], width=2, style=tk.ARC)
-        for i,v in enumerate((0,25,50,75,100)):
-            ang = math.radians(sa + i*270/4)
-            x1,y1 = c+(r-10)*math.cos(ang), c+(r-10)*math.sin(ang)
-            x2,y2 = c+(r-30)*math.cos(ang), c+(r-30)*math.sin(ang)
-            canvas.create_line(x1,y1,x2,y2, fill=self.colors['fg'], width=2)
-            lx,ly = c+(r-45)*math.cos(ang), c+(r-45)*math.sin(ang)
-            canvas.create_text(lx, ly, text=str(v),
-                               fill=self.colors['fg'], font=('Segoe UI',7,'bold'))
+    def _draw_background(self, cvs, pct_max, hw_max):
+        sa, ea = 135, 405
+        c, r = self.gauge_center, self.gauge_radius
+        cvs.create_arc(c - r, c - r, c + r, c + r, start=sa, extent=ea - sa,
+                       outline=self.colors['fg'], width=2, style=tk.ARC)
+        for i, v in enumerate((0, 25, 50, 75, 100)):
+            ang = math.radians(sa + i * 270 / 4)
+            x1 = c + (r - 10) * math.cos(ang)
+            y1 = c + (r - 10) * math.sin(ang)
+            x2 = c + (r - 30) * math.cos(ang)
+            y2 = c + (r - 30) * math.sin(ang)
+            cvs.create_line(x1, y1, x2, y2, fill=self.colors['fg'], width=2)
+            lx = c + (r - 45) * math.cos(ang)
+            ly = c + (r - 45) * math.sin(ang)
+            cvs.create_text(lx, ly, text=str(v),
+                            fill=self.colors['fg'], font=('Segoe UI', 7, 'bold'))
         for i in range(5):
-            ang = math.radians(sa + i*270/4)
-            val = (i/4)*hw_max
-            lx,ly = c+(r+20)*math.cos(ang), c+(r+20)*math.sin(ang)
-            canvas.create_text(lx, ly, text=f'{val:.1f}',
-                               fill=self.colors['fg'], font=('Segoe UI',7))
-        canvas.create_oval(c-self.inner_radius, c-self.inner_radius,
-                           c+self.inner_radius, c+self.inner_radius,
-                           fill=self.colors['ac3'])
+            ang = math.radians(sa + i * 270 / 4)
+            val = (i / 4) * hw_max
+            lx = c + (r + 20) * math.cos(ang)
+            ly = c + (r + 20) * math.sin(ang)
+            cvs.create_text(lx, ly, text=f'{val:.1f}',
+                            fill=self.colors['fg'], font=('Segoe UI', 7))
+        cvs.create_oval(c - self.inner_radius, c - self.inner_radius,
+                        c + self.inner_radius, c + self.inner_radius,
+                        fill=self.colors['ac3'])
 
-    def setup_monitoring(self):
-        self.process_cache   = {}
-        self.disk_counters   = {}
-        self.monitoring      = True
-        self.update_interval = 2000  # 2 s
-        self.update_gadgets()
+    def _refresh_disk_gauge(self):
+        cvs = self.disk_canvas
+        needle = self.disk_needle
+        cvs.delete("all")
+        self._draw_background(cvs, pct_max=100, hw_max=self.disk_speed_max)
+        cur = getattr(self, 'disk_angle', 135.0)
+        rad = math.radians(cur)
+        x = self.gauge_center + self.needle_len * math.cos(rad)
+        y = self.gauge_center + self.needle_len * math.sin(rad)
+        self.disk_needle = cvs.create_line(
+            self.gauge_center, self.gauge_center, x, y,
+            fill=self.colors['ac3'], width=4, tags='needle'
+        )
+        y1 = self.gauge_center + int(self.gauge_radius * 0.5)
+        cvs.create_text(self.gauge_center, y1,
+                        text='0.0%', tags='value_text',
+                        fill=self.colors['fg'], font=('Segoe UI', 12, 'bold'))
+        y2 = self.gauge_center + int(self.gauge_radius * 0.7)
+        cvs.create_text(self.gauge_center, y2,
+                        text='0.00 MB/s', tags='hw_text',
+                        fill=self.colors['fg'], font=('Segoe UI', 8))
 
-    def update_gadgets(self):
+    def _disk_speed_test(self):
+        path = os.path.join(tempfile.gettempdir(), 'disk_test.tmp')
+        total = 0
+        start = time.time()
+        with open(path, 'wb') as f:
+            while time.time() - start < 10:
+                f.write(b'\0' * (1024 ** 2))
+                f.flush()
+                os.fsync(f.fileno())
+                total += 1024 ** 2
+        os.remove(path)
+        self.disk_speed_max = total / (1024 ** 2) / 10
+        self.root.after(0, self._refresh_disk_gauge)
+
+    def format_bytes(self, value, per_second=False):
+        units = ['B', 'KB', 'MB', 'GB', 'TB']
+        if per_second:
+            units = [u + '/s' for u in units]
+        value = float(value)
+        i = 0
+        while value >= 1024 and i < len(units) - 1:
+            value /= 1024
+            i += 1
+        return f"{value:.2f} {units[i]}"
+
+    def update_loop(self):
         if not self.monitoring: return
+
         procs = self.get_process_data()
 
-        # recria gauge disco quando speed disponível
-        if self.disk_speed_max>0 and not self.disk_updated:
-            self.disk_updated = True
-            self.disk_frame.destroy()
-            self.create_gauge('disk', 'Disk', self.disk_icon, self.colors['ac3'],
-                              pct_max=100, hw_max=self.disk_speed_max,
-                              hw_unit='MB/s', tree_fmt='{:.2f} MB/s')
-
-        # CPU
-        pct  = psutil.cpu_percent()
-        freq = psutil.cpu_freq().current/1000.0 if psutil.cpu_freq() else 0.0
+        pct = psutil.cpu_percent()
+        freq = psutil.cpu_freq().current / 1000.0 if psutil.cpu_freq() else 0.0
         self._update_gauge('cpu', pct, freq, procs, 'cpu')
 
-        # Memória
-        vm   = psutil.virtual_memory()
-        pct  = vm.percent
-        used = vm.used / (1024**3)
-        self._update_gauge('memory', pct, used, procs, 'mem')
+        vm = psutil.virtual_memory()
+        self._update_gauge('memory', vm.percent, vm.used / (1024 ** 3), procs, 'mem')
 
-        # Disco
-        speeds    = [self.get_disk_speed(p['pid'], p['read'], p['write']) for p in procs]
-        total_spd = sum(speeds)
-        pct_spd   = (total_spd/self.disk_speed_max*100) if self.disk_speed_max>0 else 0
-        disk_data = [{**p,'speed':sp} for p,sp in zip(procs,speeds)]
-        self._update_gauge('disk', pct_spd, total_spd, disk_data, 'speed')
+        speeds = [self.get_disk_speed(p['pid'], p['read'], p['write']) for p in procs]  # in bytes/s
+        total_spd_bytes = sum(speeds)
+        total_spd_mb = total_spd_bytes / (1024 ** 2)  # in MB/s
+        pct_spd = (total_spd_mb / self.disk_speed_max * 100) if self.disk_speed_max > 0 else 0
+        data_d = [{**p, 'speed': s} for p, s in zip(procs, speeds)]  # speed in bytes/s
+        self._update_gauge('disk', pct_spd, total_spd_mb, data_d, 'speed')
 
-        self.root.after(self.update_interval, self.update_gadgets)
+        for ip, lbl in zip(self.ping_ips, self.ping_lbls):
+            res = subprocess.call(
+                ['ping', '-n', '1', '-w', str(self.update_interval), ip],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            lbl.config(image=(self.green_dot if res == 0 else self.red_dot))
 
-    def _update_gauge(self, key, pct, hw_val, data, data_key):
-        fmt     = getattr(self, f'{key}_fmt')
-        unit    = getattr(self, f'{key}_unit')
-        pct_max = getattr(self, f'{key}_pct_max')
-        canvas  = getattr(self, f'{key}_canvas')
-        needle  = getattr(self, f'{key}_needle')
-        tree    = getattr(self, f'{key}_tree')
+        self.root.after(self.update_interval, self.update_loop)
 
-        # clamp e alvo
-        pct_c = max(0.0, min(pct, pct_max))
-        target_ang = 135 + (pct_c/100)*270
+    def _update_gauge(self, key, pct, hw, data, dkey):
+        fmt = getattr(self, f'{key}_fmt')
+        unit = getattr(self, f'{key}_unit')
+        pmax = getattr(self, f'{key}_pct_max')
+        cvs = getattr(self, f'{key}_canvas')
+        needle = getattr(self, f'{key}_needle')
+        tree = getattr(self, f'{key}_tree')
 
-        # anima
-        self.animate_needle(key, needle, canvas, target_ang)
+        pct_c = max(0.0, min(pct, pmax))
+        targ = 135 + (pct_c / 100) * 270
+        self._animate_needle(key, needle, cvs, targ)
 
-        # textos
-        canvas.itemconfigure('value_text', text=f'{pct_c:.1f}%')
-        canvas.itemconfigure('hw_text',    text=f'{hw_val:.2f} {unit}')
+        cvs.itemconfigure('value_text', text=f'{pct_c:.1f}%')
+        cvs.itemconfigure('hw_text', text=f'{hw:.2f} {unit}')
 
-        # tabela
         tree.delete(*tree.get_children())
-        for it in sorted(data, key=lambda x: x[data_key], reverse=True)[:5]:
-            tree.insert('', 'end',
-                        values=(it['name'][:20], fmt.format(it[data_key])))
+        if key == 'memory':
+            total_mem = psutil.virtual_memory().total
+            for it in sorted(data, key=lambda x: x['mem'], reverse=True)[:5]:
+                mem_bytes = it['mem']
+                mem_formatted = self.format_bytes(mem_bytes)
+                mem_pct = (mem_bytes / total_mem) * 100 if total_mem > 0 else 0
+                tree.insert('', 'end', values=(it['name'][:20], f"{mem_formatted} ({mem_pct:.1f}%)"))
+        elif key == 'disk':
+            for it in sorted(data, key=lambda x: x['speed'], reverse=True)[:5]:
+                speed_formatted = self.format_bytes(it['speed'], per_second=True)
+                tree.insert('', 'end', values=(it['name'][:20], speed_formatted))
+        else:
+            for it in sorted(data, key=lambda x: x[dkey], reverse=True)[:5]:
+                tree.insert('', 'end', values=(it['name'][:20], fmt.format(it[dkey])))
 
-    def animate_needle(self, key, needle, canvas, target_ang):
-        current_ang = getattr(self, f'{key}_angle')
-        steps = 10; da = (target_ang-current_ang)/steps; delay = 20
+    def _animate_needle(self, key, needle, cvs, targ):
+        cur = getattr(self, f'{key}_angle')
+        steps = 10
+        da = (targ - cur) / steps
         def step(i):
-            ang = current_ang + da*i
+            ang = cur + da * i
             rad = math.radians(ang)
-            x = self.gauge_center + self.needle_len*math.cos(rad)
-            y = self.gauge_center + self.needle_len*math.sin(rad)
-            canvas.coords(needle, self.gauge_center, self.gauge_center, x, y)
-            if i<steps:
-                canvas.after(delay, lambda: step(i+1))
+            x = self.gauge_center + self.needle_len * math.cos(rad)
+            y = self.gauge_center + self.needle_len * math.sin(rad)
+            cvs.coords(needle, self.gauge_center, self.gauge_center, x, y)
+            if i < steps:
+                cvs.after(20, lambda: step(i + 1))
             else:
-                setattr(self, f'{key}_angle', target_ang)
+                setattr(self, f'{key}_angle', targ)
         step(1)
 
     def get_process_data(self):
         lst, now = [], time.time()
-        for proc in psutil.process_iter(['pid','name','cpu_percent','io_counters']):
+        for proc in psutil.process_iter(['pid', 'name', 'cpu_percent', 'io_counters', 'memory_info']):
             try:
-                name = proc.info['name']
-                if name in ['System Idle Process','System']: continue
-                prev = self.process_cache.get(proc.info['pid'])
+                nm = proc.info['name']
+                if nm in ('System', 'System Idle Process'): continue
+                prev = self.process_cache.get(proc.pid)
                 if prev and now - prev['time'] < 1.5:
                     lst.append(prev); continue
-
-                cpu_u = min(proc.info['cpu_percent']/self.cpu_cores,100.0) if proc.info['cpu_percent'] else 0.0
-                if cpu_u < 1.0: continue
-
-                mem_mb = proc.memory_info().rss/(1024**2) if proc.memory_info() else 0
-                rd = proc.info['io_counters'].read_bytes  if proc.info['io_counters'] else 0
-                wr = proc.info['io_counters'].write_bytes if proc.info['io_counters'] else 0
-
-                d = {'pid':proc.info['pid'],'name':name,'cpu':cpu_u,
-                     'mem':mem_mb,'read':rd,'write':wr,'time':now}
-                self.process_cache[proc.info['pid']] = d
+                cpu_u = (proc.info['cpu_percent'] and
+                         min(proc.info['cpu_percent'] / self.cpu_cores, 100)) or 0
+                mem_info = proc.info['memory_info']
+                mem = mem_info.rss if mem_info else 0  # in bytes
+                io = proc.info['io_counters']
+                rd = io.read_bytes if io else 0
+                wr = io.write_bytes if io else 0
+                d = {'pid': proc.pid, 'name': nm, 'cpu': cpu_u,
+                     'mem': mem, 'read': rd, 'write': wr, 'time': now}
+                self.process_cache[proc.pid] = d
                 lst.append(d)
-            except:
-                continue
+            except: pass
         return lst
 
     def get_disk_speed(self, pid, r, w):
-        rec = self.disk_counters.get(pid); t = time.time()
+        rec = self.disk_counters.get(pid)
+        t = time.time()
         if not rec:
-            self.disk_counters[pid] = (r, w, t); return 0.0
-        lr, lw, lt = rec; dt = t - lt
-        if dt<0.2: return 0.0
-        spd = ((r-lr)+(w-lw))/(dt*(1024**2))
+            self.disk_counters[pid] = (r, w, t)
+            return 0
+        lr, lw, lt = rec
+        dt = t - lt
+        if dt < 0.2:
+            return 0
+        spd = ((r - lr) + (w - lw)) / dt  # bytes per second
         self.disk_counters[pid] = (r, w, t)
-        return round(spd,2)
+        return spd
 
-    def _disk_speed_test(self):
-        path = os.path.join(tempfile.gettempdir(), 'disk_test.tmp')
-        total = 0; start = time.time()
-        with open(path,'wb') as f:
-            while time.time()-start<10:
-                chunk=b'\0'*(1024**2); f.write(chunk)
-                f.flush(); os.fsync(f.fileno()); total+=len(chunk)
-        os.remove(path)
-        self.disk_speed_max = total/(1024**2)/10
+    def stop(self):
+        self.monitoring = False
+        self.btn_pause.config(state=tk.DISABLED)
+        self.btn_resume.config(state=tk.NORMAL)
 
-    def stop_monitoring(self):
-        if self.monitoring:
-            self.monitoring=False
-            self.btn_pause.config(state=tk.DISABLED)
-            self.btn_resume.config(state=tk.NORMAL)
-
-    def restart_monitoring(self):
+    def start(self):
         if not self.monitoring:
-            self.monitoring=True
+            self.monitoring = True
             self.btn_pause.config(state=tk.NORMAL)
             self.btn_resume.config(state=tk.DISABLED)
-            self.update_gadgets()
+            self.update_loop()
 
 if __name__ == '__main__':
     root = tk.Tk()
-    app  = SystemMonitor(root)
+    app = SystemMonitor(root)
     root.mainloop()
