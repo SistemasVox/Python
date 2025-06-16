@@ -5,7 +5,7 @@ Nome do Script: treeview_ascii_gui.py
 Descrição: Gera árvore de diretórios em ASCII com interface gráfica moderna usando CustomTkinter,
            perguntando se deve ignorar arquivos/pastas conforme .gitignore, incluindo .gitignore aninhados,
            e pulando automaticamente qualquer pasta chamada .git.
-Autor: Marcelo José Vieira
+Autor: Marcelo Vieira
 Data: 2025-04-08 (adaptado em 2025-06-15)
 Versão: 1.3
 
