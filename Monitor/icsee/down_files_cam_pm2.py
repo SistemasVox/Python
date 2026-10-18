@@ -182,9 +182,13 @@ _patch_dvrip_streaming_download()
 
 
 # ==================== CONFIGURAÇÕES ====================
-HOST: str = os.getenv("DVR_HOST", "0.0.0.0")
-USER: str = os.getenv("DVR_USER", "0000")
-PASSWORD: str = os.getenv("DVR_PASSWORD", "00000")
+# O DDNS é o caminho preferencial. Se ele estiver indisponível, a mesma
+# câmera pode ser alcançada pelo túnel WireGuard como redundância.
+PRIMARY_HOST: str = os.getenv("DVR_DDNS_HOST", "svoxrouter.ddns.net")
+FALLBACK_HOST: str = os.getenv("DVR_HOST", "10.10.0.2")
+HOST: str = PRIMARY_HOST
+USER: str = os.getenv("DVR_USER", "marcelo")
+PASSWORD: str = os.getenv("DVR_PASSWORD", "Q1w2e3r4t5.")
 PORT: int = int(os.getenv("DVR_PORT", "34567"))
 DOWNLOAD_DIR: str = os.getenv("DOWNLOAD_DIR", "gravacoes")
 TIMEOUT_CONNECT: int = int(os.getenv("TIMEOUT_CONNECT", "2"))
@@ -197,9 +201,12 @@ DB_PATH: str = os.path.join(DOWNLOAD_DIR, ".download_cache.db")
 TMP_DIR: str = os.path.join(DOWNLOAD_DIR, ".tmp")
 ALERT_SCRIPT: str = os.getenv("ALERT_SCRIPT", "alert_motion.py")
 STALL_TIMEOUT: int = int(os.getenv("STALL_TIMEOUT", "30"))
-CHECK_INTERVAL: int = int(os.getenv("CHECK_INTERVAL", "5"))
+CHECK_INTERVAL: int = int(os.getenv("CHECK_INTERVAL", "2"))
 MAX_DOWNLOAD_TIME: int = int(os.getenv("MAX_DOWNLOAD_TIME", "3600"))
-DOWNLOAD_TIMEOUT_PER_FILE: int = int(os.getenv("DOWNLOAD_TIMEOUT_PER_FILE", "30"))
+# STALL_TIMEOUT é a decisão normal: só interrompe se o .part não cresce.
+# O teto total é excepcional e desabilitado por padrão (0); pode ser ativado
+# por ambiente para instalações que precisem de um limite operacional rígido.
+DOWNLOAD_TIMEOUT_PER_FILE: int = int(os.getenv("DOWNLOAD_TIMEOUT_PER_FILE", "0"))
 LOGIN_MAX_RETRIES: int = int(os.getenv("LOGIN_MAX_RETRIES", "3"))
 LOGIN_BACKOFF_SECONDS: int = int(os.getenv("LOGIN_BACKOFF_SECONDS", "2"))
 CAMERA_IO_TIMEOUT: int = int(os.getenv("CAMERA_IO_TIMEOUT", "20"))
@@ -212,13 +219,13 @@ CB_MAX_FAILURES: int = int(os.getenv("CB_MAX_FAILURES", "3"))
 CB_BACKOFF_LEVELS: List[int] = [60, 300, 900, 3600, 21600, 86400]
 WHATSAPP_NUMBERS: List[str] = [
     n.strip()
-    for n in os.getenv("WHATSAPP_NOTIFY_NUMBERS", "0000000000000").split(",")
+    for n in os.getenv("WHATSAPP_NOTIFY_NUMBERS", "553491509513").split(",")
     if n.strip()
 ]
 
 # ==================== CONFIGURAÇÕES PM2 ====================
 SLEEP_ONLINE: int = int(os.getenv("SLEEP_ONLINE", "10"))
-SLEEP_IDLE: int = int(os.getenv("SLEEP_IDLE", "30"))
+SLEEP_IDLE: int = int(os.getenv("SLEEP_IDLE", "60"))
 SLEEP_OFFLINE: int = int(os.getenv("SLEEP_OFFLINE", "60"))
 SLEEP_ERROR: int = int(os.getenv("SLEEP_ERROR", "120"))
 INIT_MAX_RETRIES: int = int(os.getenv("INIT_MAX_RETRIES", "5"))
@@ -295,6 +302,7 @@ class DatabaseManager:
 
     def _connect(self) -> sqlite3.Connection:
         """Tenta abrir a conexão, recriando o banco se necessário."""
+        db_existed = os.path.exists(self.db_path)
         try:
             conn = sqlite3.connect(self.db_path, timeout=30)
             conn.execute("PRAGMA journal_mode=WAL")
@@ -307,7 +315,11 @@ class DatabaseManager:
             # Verifica se as tabelas existem
             cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='downloads'")
             if not cursor.fetchone():
-                raise sqlite3.DatabaseError("Tabela 'downloads' não encontrada")
+                if not db_existed:
+                    conn.executescript(DB_SCHEMA)
+                    conn.commit()
+                else:
+                    raise sqlite3.DatabaseError("Tabela 'downloads' não encontrada")
             # Se chegou aqui, está ok
             if self.degraded:
                 log.info("💾 Banco recuperado, saindo do modo degradado.")
@@ -315,16 +327,33 @@ class DatabaseManager:
                 self._recreate_attempts = 0
                 self._last_recreate_error = None
             return conn
-        except (sqlite3.OperationalError, sqlite3.DatabaseError) as e:
-            log.warning(f"Erro ao abrir banco: {e}. Tentando recriar...")
-            self._recreate_db()
+        except sqlite3.OperationalError as e:
+            # Lock e timeout são transitórios: nunca justificam apagar cache.
+            log.warning("Erro transiente ao abrir banco: %s", e)
+            raise
+        except sqlite3.DatabaseError as e:
+            reason = str(e).lower()
+            confirmed_corruption = (
+                "integrity check failed" in reason
+                or "malformed" in reason
+                or "not a database" in reason
+                or "file is encrypted" in reason
+            )
+            if not confirmed_corruption:
+                log.error("Erro de esquema no banco; cache preservado: %s", e)
+                raise
+            log.warning("Corrupção confirmada no banco: %s", e)
+            self._recreate_db(str(e))
             return self._connect()
 
-    def _recreate_db(self) -> None:
-        """Recria o banco a partir do esquema, com controle de tentativas."""
+    def _recreate_db(self, reason: str = "não informado") -> None:
+        """Recria o banco somente após falha confirmada, preservando cópia."""
         with self._lock:
             self._recreate_attempts += 1
-            log.warning(f"🔄 Recriando banco (tentativa {self._recreate_attempts})...")
+            log.warning(
+                "🔄 Recriando banco (tentativa %s, motivo: %s)...",
+                self._recreate_attempts, sanitize(reason),
+            )
             # Fecha conexão existente
             if self._conn:
                 try:
@@ -332,11 +361,17 @@ class DatabaseManager:
                 except Exception:
                     pass
                 self._conn = None
-            # Remove arquivo antigo se existir
+            # Nunca apaga o único vestígio de um cache potencialmente útil.
+            # O backup também torna a causa auditável antes de qualquer ação
+            # de recuperação destrutiva.
             if os.path.exists(self.db_path):
                 try:
+                    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                    backup_path = f"{self.db_path}.corrupt-{stamp}"
+                    shutil.copy2(self.db_path, backup_path)
+                    fix_perms(backup_path)
                     os.remove(self.db_path)
-                    log.info(f"Arquivo antigo removido: {self.db_path}")
+                    log.warning("Cache anterior preservado em %s", backup_path)
                 except OSError as e:
                     log.error(f"Não foi possível remover {self.db_path}: {e}")
                     self._last_recreate_error = str(e)
@@ -423,20 +458,11 @@ class DatabaseManager:
             except (sqlite3.OperationalError, sqlite3.DatabaseError) as e:
                 if attempt == retries - 1:
                     log.error(f"Falha na query após {retries} tentativas: {e}")
-                    self._recreate_db()
-                    if self.degraded:
-                        return None
-                    # Tenta novamente após recriação
-                    try:
-                        conn = self.get_connection()
-                        cursor = conn.cursor()
-                        cursor.execute(query, params)
-                        conn.commit()
-                        return cursor
-                    except Exception as final_e:
-                        log.error(f"Falha final na query: {final_e}")
-                        self._enter_degraded_mode()
-                        return None
+                    # "locked", timeout e quedas breves não são corrupção.
+                    # Recriar aqui apagava cursor, metadados e circuit breaker
+                    # sob carga. O próximo ciclo reconecta e tenta novamente.
+                    self._conn = None
+                    return None
                 time.sleep(0.5 * (attempt + 1))
                 # Força reconexão
                 self._conn = None
@@ -483,11 +509,14 @@ def format_hhmmss(total_seconds: float) -> str:
 
 # ==================== BANCO DE DADOS (FUNÇÕES ADAPTADAS) ====================
 def init_db() -> None:
-    """Cria diretórios e recria banco se necessário."""
+    """Cria diretórios e abre o banco, preservando um cache íntegro."""
     for d in [DOWNLOAD_DIR, TMP_DIR]:
         os.makedirs(d, exist_ok=True)
         fix_perms(d, True)
-    db_manager._recreate_db()
+    # ``get_connection`` inicializa o esquema quando o arquivo está ausente
+    # ou corrompido. Recriá-lo incondicionalmente apagava downloads, metadados
+    # e o circuit breaker a cada reinício do PM2.
+    db_manager.get_connection()
 
 
 def ensure_storage_dirs() -> None:
@@ -726,15 +755,30 @@ class WhatsAppNotifier:
 # ==================== CONECTIVIDADE ====================
 class ConnectivityMonitor:
     @staticmethod
-    def is_online() -> bool:
+    def _is_tcp_reachable(host: str) -> bool:
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(TIMEOUT_CONNECT)
-            result = sock.connect_ex((HOST, PORT))
+            result = sock.connect_ex((host, PORT))
             sock.close()
             return result == 0
         except Exception:
             return False
+
+    @classmethod
+    def is_online(cls) -> bool:
+        """Select the protected DDNS path first, then the WireGuard endpoint."""
+        global HOST
+        candidates = [PRIMARY_HOST]
+        if FALLBACK_HOST and FALLBACK_HOST not in candidates:
+            candidates.append(FALLBACK_HOST)
+        for host in candidates:
+            if cls._is_tcp_reachable(host):
+                if HOST != host:
+                    log.warning("Caminho da câmera alterado para %s", host)
+                HOST = host
+                return True
+        return False
 
 # ==================== CÂMERA ====================
 def conectar(silent: bool = False) -> Optional[DVRIPCam]:
@@ -996,7 +1040,6 @@ def _batch_worker(
         progress_q.put(("fatal", f"Erro: {e}"))
         return
 
-    sucessos: List[Tuple[str, str, str, int, Dict]] = []
     try:
         for idx, (item, tmp_path, target, rel_path) in enumerate(plano, 1):
             try:
@@ -1013,8 +1056,15 @@ def _batch_worker(
                     raise RuntimeError("Arquivo vazio")
                 if not validar_arquivo(tmp_path, item["tipo"]):
                     raise RuntimeError("Arquivo corrompido")
-                sucessos.append((tmp_path, target, rel_path, os.path.getsize(tmp_path), item))
                 progress_q.put(("file_downloaded", rel_path))
+                # Confirma cada mídia logo após a validação. Antes os sucessos
+                # ficavam apenas em .part até o fim do lote; ao interromper um
+                # arquivo lento, todos os anteriores eram perdidos também.
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                shutil.move(tmp_path, target)
+                progress_q.put(
+                    ("file_moved", rel_path, os.path.getsize(target), item)
+                )
             except Exception as e:
                 progress_q.put(("file_error", rel_path, str(e)))
                 if os.path.exists(tmp_path):
@@ -1037,17 +1087,6 @@ def _batch_worker(
         except Exception:
             pass
 
-    if sucessos:
-        moved: List[Tuple[str, int, Dict]] = []
-        for tmp_path, target, rel_path, size, item in sucessos:
-            try:
-                os.makedirs(os.path.dirname(target), exist_ok=True)
-                shutil.move(tmp_path, target)
-                fix_perms(target)
-                moved.append((rel_path, size, item))
-            except Exception as e:
-                log.error(f"Falha ao mover {rel_path}: {e}")
-        progress_q.put(("files_moved", moved))
     progress_q.put(("batch_done", None))
 
 def baixar_lote(
@@ -1092,6 +1131,7 @@ def baixar_lote(
     batch_start = time.time()
     file_start = time.time()
     max_gap = 0.0
+    abort_reason: Optional[str] = None
 
     def drain() -> None:
         nonlocal sucessos, falhas, current_rel, current_tmp, last_size, stall_start
@@ -1114,20 +1154,21 @@ def baixar_lote(
                     f"tamanho final: {last_size} bytes"
                 )
                 current_rel, current_tmp = None, None
-            elif kind == "files_moved":
-                for rel, size, item in msg[1]:
-                    target_path = os.path.join(DOWNLOAD_DIR, rel)
-                    if not os.path.isfile(target_path):
-                        log.warning(
-                            f"🗑️ Arquivo removido antes da confirmação: {sanitize(rel)}"
-                        )
-                        cb.record_failure(rel, "Arquivo final removido durante o download")
-                        falhas += 1
-                        continue
-                    mark_downloaded(rel, size)
-                    cb.record_success(rel)
-                    sucessos += 1
-                    itens_sucesso.append(item)
+            elif kind == "file_moved":
+                rel, size, item = msg[1], msg[2], msg[3]
+                target_path = os.path.join(DOWNLOAD_DIR, rel)
+                if not os.path.isfile(target_path):
+                    log.warning(
+                        f"🗑️ Arquivo removido antes da confirmação: {sanitize(rel)}"
+                    )
+                    cb.record_failure(rel, "Arquivo final removido durante o download")
+                    falhas += 1
+                    continue
+                fix_perms(target_path)
+                mark_downloaded(rel, size)
+                cb.record_success(rel)
+                sucessos += 1
+                itens_sucesso.append(item)
             elif kind == "file_error":
                 rel, err = msg[1], msg[2]
                 dur = time.time() - file_start
@@ -1160,18 +1201,22 @@ def baixar_lote(
                         max_gap = gap
                     last_size, stall_start = size, now
                 elif (now - stall_start) > STALL_TIMEOUT:
-                    log.warning(
-                        f"⏱️ Download sem progresso por {STALL_TIMEOUT}s: "
-                        f"{sanitize(current_rel)}"
+                    abort_reason = (
+                        f"Sem progresso por {STALL_TIMEOUT}s durante download"
                     )
+                    log.warning(f"⏱️ {abort_reason}: {sanitize(current_rel)}")
                     break
             elif (now - file_start) > STALL_TIMEOUT:
-                log.warning(
-                    f"🗑️ Arquivo temporário removido durante download: "
-                    f"{sanitize(current_rel)}"
-                )
+                abort_reason = "Arquivo temporário removido durante download"
+                log.warning(f"🗑️ {abort_reason}: {sanitize(current_rel)}")
+                break
+            if timeout > 0 and (now - file_start) > timeout:
+                abort_reason = f"Timeout por arquivo após {timeout}s"
+                log.warning(f"⏱️ {abort_reason}: {sanitize(current_rel)}")
                 break
         if (now - batch_start) > MAX_DOWNLOAD_TIME:
+            abort_reason = f"Timeout global do lote após {MAX_DOWNLOAD_TIME}s"
+            log.warning(f"⏱️ {abort_reason}")
             break
 
     if proc.is_alive():
@@ -1184,6 +1229,22 @@ def baixar_lote(
         proc.join(timeout=2)
     drain()
     _active_proc = None
+
+    # A terminação do processo impede o worker de devolver ``file_error``.
+    # Registre a falha aqui para que o circuit breaker aplique o retry/backoff.
+    if abort_reason and current_rel:
+        dur = time.time() - file_start
+        log.info(
+            f"📊 Stall-stats (interrompido): {sanitize(current_rel)} | "
+            f"maior pausa sem crescimento: {max_gap:.1f}s | "
+            f"duração total: {dur:.1f}s | último tamanho visto: {last_size} bytes"
+        )
+        falhas += 1
+        cb.record_failure(current_rel, abort_reason)
+        log.info(
+            "Fila continua; arquivo com falha será retomado após o backoff "
+            "do circuit breaker: %s", sanitize(current_rel),
+        )
 
     if current_tmp and os.path.exists(current_tmp):
         try:
@@ -1526,8 +1587,14 @@ def db_watchdog_thread() -> None:
                     conn = db_manager.get_connection()
                     conn.cursor().execute("SELECT 1").fetchone()
                 except Exception as e:
-                    log.error(f"Watchdog detectou problema no banco: {e}")
-                    db_manager._recreate_db()
+                    # A validação estrutural em _connect já cuida de corrupção
+                    # confirmada. Aqui apenas descartamos a conexão para que um
+                    # lock/timeout tenha retry no próximo ciclo, sem perda.
+                    log.warning(
+                        "Watchdog detectou falha transiente no banco; "
+                        "cache preservado: %s", e,
+                    )
+                    db_manager._conn = None
         except Exception as e:
             log.error(f"Erro no watchdog: {e}")
         # Aguarda 5 minutos ou até receber sinal de parada
@@ -1619,6 +1686,12 @@ def run_cycle(
                     log.info("Sanidade concluída.")
 
             if not todos:
+                # Uma consulta de sanidade vazia ainda é uma sanidade bem-
+                # sucedida. Sem este marco, depois de uma recuperação do DB
+                # o serviço repetia uma varredura de 7 dias a cada ciclo.
+                if is_sanity:
+                    set_meta("last_sanity_check", datetime.now())
+                    log.info("Sanidade concluída sem arquivos [M].")
                 log.info("Nenhum arquivo [M]. Aguardando.")
                 break
 
