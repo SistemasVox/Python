@@ -19,6 +19,7 @@ Smart features:
     - Absolute timeout based on expected duration
 """
 import argparse
+import math
 import logging
 import os
 import re
@@ -44,12 +45,13 @@ log = logging.getLogger("frame_extractor")
 # ---------------------------------------------------------------------------
 # Tunables
 # ---------------------------------------------------------------------------
-STALL_THRESHOLD_SEC = 3.0       # Kill ffmpeg if progress stalls for this long
+STALL_THRESHOLD_SEC = 8.0       # Dá tempo ao H.264 bruto finalizar/escrever JPEGs
 DURATION_MARGIN_SEC = 2.0       # Stop after duration + margin (for -t flag)
 TIMEOUT_MULTIPLIER = 2.0        # Absolute timeout = duration * multiplier + buffer
 TIMEOUT_BUFFER_SEC = 10.0       # Buffer added to absolute timeout
 SELECT_TIMEOUT_SEC = 0.5        # Timeout for select() calls (non-blocking read)
 SUCCESS_THRESHOLD_RATIO = 0.90  # Check frames on disk when reaching 90% of expected duration
+EARLY_SUCCESS_FRAME_RATIO = 0.95  # Aceita a cauda incompleta de H.264 bruto
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -340,6 +342,7 @@ class FrameExtractor:
         self.num_frames = num_frames
         self.fps = fps if fps and fps > 0 else 1.0
         self.video_info: Optional[VideoInfo] = None
+        self.stall_timeout = STALL_THRESHOLD_SEC
 
     def _validate_inputs(self) -> None:
         if not self.video_path.exists():
@@ -360,11 +363,23 @@ class FrameExtractor:
             self.output_dir.mkdir(parents=True, exist_ok=True)
             log.info("Probing video: %s", self.video_path)
             self.video_info = probe_video(self.video_path)
+            if self.video_info.duration > 0:
+                # Raw H.264 clips can spend longer between progress updates
+                # while ffmpeg probes/decodes. Scale the stall window gently
+                # with clip duration; the absolute timeout remains the hard
+                # upper bound.
+                self.stall_timeout = min(
+                    30.0,
+                    max(
+                        STALL_THRESHOLD_SEC,
+                        STALL_THRESHOLD_SEC + self.video_info.duration * 0.05,
+                    ),
+                )
             if self.video_info.duration_unknown:
                 log.warning(
                     "Video duration unknown. Progress will show elapsed time only. "
                     "Stall detection (%.0fs) will be used to stop extraction.",
-                    STALL_THRESHOLD_SEC,
+                    self.stall_timeout,
                 )
             else:
                 log.info(
@@ -545,7 +560,7 @@ class FrameExtractor:
                             if prog.current_time > last_reported_time:
                                 last_reported_time = prog.current_time
                                 last_advance_wall = now
-                            elif (now - last_advance_wall) > STALL_THRESHOLD_SEC:
+                            elif (now - last_advance_wall) > self.stall_timeout:
                                 log.info(
                                     "ffmpeg stalled: no progress for %.1fs (last time=%.2fs). "
                                     "Stopping early.",
@@ -572,7 +587,7 @@ class FrameExtractor:
                 else:
                     now = time.monotonic()
                     # Stall detection (even without new progress lines)
-                    if (now - last_advance_wall) > STALL_THRESHOLD_SEC and last_reported_time > 0:
+                    if (now - last_advance_wall) > self.stall_timeout and last_reported_time > 0:
                         # Before killing, check if frames are already complete
                         if frames_expected > 0:
                             on_disk = quick_frame_count(self.output_dir)
@@ -622,7 +637,10 @@ class FrameExtractor:
             result.frames_extracted = len(result.output_files)
             if stopped_early:
                 result.stop_reason = stop_reason
-                if result.frames_extracted > 0:
+                minimum_frames = math.ceil(
+                    result.frames_expected * EARLY_SUCCESS_FRAME_RATIO
+                ) if result.frames_expected > 0 else 1
+                if result.frames_extracted >= minimum_frames:
                     result.success = True
                     if stop_reason == "frames_complete":
                         result.warnings.append(
@@ -631,7 +649,7 @@ class FrameExtractor:
                         )
                     elif stop_reason == "stalled":
                         result.warnings.append(
-                            f"Stopped early: ffmpeg stalled (no progress for {STALL_THRESHOLD_SEC:.0f}s). "
+                            f"Stopped early: ffmpeg stalled (no progress for {self.stall_timeout:.0f}s). "
                             f"Extracted {result.frames_extracted} frames."
                         )
                     elif stop_reason == "timeout":
@@ -640,16 +658,25 @@ class FrameExtractor:
                             f"Extracted {result.frames_extracted} frames."
                         )
                     log.info(
-                        "Early stop (%s). Extracted %d frames.",
+                        "Early stop accepted (%s). Extracted %d/%s frames.",
                         stop_reason, result.frames_extracted,
+                        result.frames_expected or "?",
                     )
                 else:
                     result.error_message = (
-                        f"Stopped early ({stop_reason}) but no frames were extracted."
+                        f"Stopped early ({stop_reason}) with only "
+                        f"{result.frames_extracted}/{result.frames_expected or '?'} frames."
                     )
                     log.error(result.error_message)
                     return
-            if proc.returncode != 0:
+            if proc.returncode != 0 and result.success and stopped_early:
+                result.error_code = proc.returncode
+                result.stop_reason = f"{stop_reason}_accepted"
+                result.warnings.append(
+                    f"ffmpeg was stopped by the extractor after sufficient output "
+                    f"({result.frames_extracted}/{result.frames_expected or '?'} frames)."
+                )
+            elif proc.returncode != 0:
                 result.error_code = proc.returncode
                 result.stop_reason = "error"
                 if is_likely_successful_extraction(
